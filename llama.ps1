@@ -424,6 +424,13 @@ function Start-LLMServer {
 }
 
 do {
+    # -------------------------------------------------------------------------
+    # GLOBAL OPTIMIZATION NOTE (Ryzen 5900HX + RTX 3070 8GB + 64GB RAM):
+    # MoE Models (Qwen, GLM, GPT-OSS) use `-ot .ffn_.*_exps.=CPU` or `--n-cpu-moe`
+    # to offload the massive "Sparse Expert" layers to system RAM while keeping
+    # the active "hot" layers on the GPU. This allows running 100B+ models on 8GB VRAM.
+    # -------------------------------------------------------------------------
+
     Show-Menu
     $choice = Read-Host "Select a model [1-8, S, X]"
 
@@ -479,6 +486,7 @@ do {
         '2' {
             # GUIDE: https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF
             # Best Practices: temp=0.6, top_p=0.95, top_k=20, min_p=0
+            # CRITICAL: min_p=0 prevents cutting off low-probability reasoning tokens.
             Start-LLMServer -ModelPath $MODELS['2'].Path -Alias 'qwen3-thinking' -Arguments @(
                 '-m',        $MODELS['2'].Path
                 '--host',    '0.0.0.0'
@@ -499,6 +507,7 @@ do {
                 '--min-p',   '0'
                 '-ot',       '.ffn_.*_exps.=CPU'
                 '--jinja'
+                '--chat-template-kwargs', '{"enable_thinking":true}'
                 '--alias',   'qwen3-thinking'
             )
         }
@@ -557,7 +566,8 @@ do {
         }
         '5' {
             # GUIDE: https://docs.unsloth.ai/models/glm-4.6-how-to-run-locally
-            # Z.ai recommended: temp=0.8, top_p=0.6, top_k=2, repeat_penalty=1.1, min_p=0
+            # Recommended: temp=1.0, top_p=0.95, top_k=40
+            # System prompt is vital to force English reasoning
             Start-LLMServer -ModelPath $MODELS['5'].Path -Alias 'glm-flash' -Arguments @(
                 '-m',        $MODELS['5'].Path
                 '--mmproj',  "$LLM_DIR\GLM-4.6V-Flash\mmproj-F16.gguf"
@@ -572,11 +582,11 @@ do {
                 '-ctk',      'q4_0'
                 '-ctv',      'q4_0'
                 '-b',        '512'
-                '--temp',    '0.8'
-                '--top-p',   '0.6'
-                '--top-k',   '2'
+                '--temp',    '1.0'
+                '--top-p',   '0.95'
+                '--top-k',   '40'
                 '--min-p',   '0.0'
-                '--repeat-penalty', '1.1'
+                '--system-prompt', 'Respond in English and reason in English'
                 '-ot',       '.ffn_.*_exps.=CPU'
                 '--jinja'
                 '--alias',   'glm-flash'
@@ -603,8 +613,9 @@ do {
         }
         '7' {
             # GUIDE: https://github.com/ggml-org/llama.cpp/discussions/15396
-            # GPT-OSS-120B: Heavy MoE model
-            # OpenAI recommends: temp=1.0, top_p=1.0; use min_p=0.01 for performance
+            # GPT-OSS-120B: Heavy MoE model (requires aggressive offloading)
+            # CRITICAL: Top-K forced to 0 (disabled) to avoid performance kill.
+            # OPTIMIZATION: min_p=0 for accuracy (slower) vs min_p=0.01 for speed.
             Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'gpt-oss' -Arguments @(
                 '-m',        $MODELS['7'].Path
                 '--host',    '0.0.0.0'
@@ -620,13 +631,16 @@ do {
                 '-ub',       '2048'
                 '--temp',    '1.0'
                 '--top-p',   '1.0'
-                '--min-p',   '0.01'
+                '--top-k',   '0'
+                '--min-p',   '0'
                 '--jinja'
                 '--alias',   'gpt-oss'
             )
         }
         '8' {
             # GUIDE: https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF
+            # Edge Model (1.2B). Optimized for low-latency on-device use.
+            # Best Practice: Keep temperature low (0.1) for stability.
             Start-LLMServer -ModelPath $MODELS['8'].Path -Alias 'lfm-edge' -Arguments @(
                 '-m',        $MODELS['8'].Path
                 '--host',    '0.0.0.0'
