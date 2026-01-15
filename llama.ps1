@@ -68,7 +68,7 @@
 # =================================================================
 
 # --- CONFIGURATION ---
-$SERVER_PATH = ".\build\bin\llama-server.exe"
+$SERVER_PATH = "C:\Temp\llama.cpp\build\bin\llama-server.exe"
 $LLM_DIR = "H:\LLM"
 $DEFAULT_PORT = 8080
 $LOG_DIR = "$PSScriptRoot\logs"
@@ -251,7 +251,7 @@ function Start-LLMServer {
     Write-Host ""
 
     try {
-        Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -Wait -RedirectStandardOutput $logFile
+        Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFile
     } catch {
         Write-Host "ERROR: Failed to start server: $_" -ForegroundColor Red
         Read-Host "Press Enter to continue"
@@ -361,6 +361,7 @@ do {
         '4' {
             # GUIDE: https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B
             # NVIDIA recommends: temp=1.0, top_p=1.0 for reasoning; temp=0.6, top_p=0.95 for tool calling
+            $kwargs = '{"enable_thinking":true}'
             Start-LLMServer -ModelPath $MODELS['4'].Path -Alias 'nemotron' -Arguments @(
                 '-m',        $MODELS['4'].Path
                 '--host',    '0.0.0.0'
@@ -379,7 +380,7 @@ do {
                 '--top-p',   '1.0'
                 '-ot',       '.ffn_.*_exps.=CPU'
                 '--jinja'
-                '--chat-template-kwargs', '{"enable_thinking":true}'
+                '--chat-template-kwargs', $kwargs
                 '--alias',   'nemotron'
             )
         }
