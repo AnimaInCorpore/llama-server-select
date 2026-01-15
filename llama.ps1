@@ -1,4 +1,4 @@
-# LLM Manager - RTX 3070 8GB / 64GB RAM
+# LLM Manager
 # ==========================================================
 # PC SPEC: Ryzen 5900HX (8C/16T) | RTX 3070 (8GB VRAM) | 64GB DDR4 RAM
 # SERVER REF: https://github.com/ggml-org/llama.cpp/discussions
@@ -50,7 +50,7 @@
 # Nemotron: Use enable_thinking=true for reasoning, false for faster non-reasoning responses
 # Qwen3-Thinking: Supports 256K context, recommend >131K for complex reasoning
 # Vision models: Require --mmproj for the vision encoder
-# GPT-OSS-120B: Requires ~64GB RAM. Use --n-cpu-moe 35 for 8GB VRAM. Avoid KV cache quant (hurts perf).
+# GPT-OSS-120B: Heavy MoE model. Avoid KV cache quant (hurts perf).
 #               min_p=0.0 causes 40% slowdown vs min_p=0.01
 #
 # DOCUMENTATION SOURCES:
@@ -100,7 +100,7 @@ if (-not $env:LLM_API_KEY) {
 
 # Set window title (ignore if host doesn't support it)
 try {
-    $Host.UI.RawUI.WindowTitle = "LLM Manager - RTX 3070 8GB / 64GB RAM"
+    $Host.UI.RawUI.WindowTitle = "LLM Manager"
 } catch { }
 
 # Model definitions with metadata
@@ -108,42 +108,42 @@ $MODELS = @{
     '1' = @{
         Name = "Qwen3-Coder-30B"; Context = "65k"; Category = "Coding Expert"
         Path = "C:\Temp\Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf"
-        VRAM = "~7GB"; MoE = $true
+        MoE = $true
     }
     '2' = @{
         Name = "Qwen3-30B Thinking"; Context = "32k"; Category = "Logic/Reasoning"
         Path = "$LLM_DIR\Qwen3-30B-A3B-UD-Q8_K_XL.gguf"
-        VRAM = "~7GB"; MoE = $true
+        MoE = $true
     }
     '3' = @{
         Name = "Qwen3-VL-30B"; Context = "65k"; Category = "Vision"
         Path = "$LLM_DIR\Qwen3-VL-Instruct\Qwen3-VL-30B-A3B-Instruct-UD-Q8_K_XL.gguf"
-        VRAM = "~7GB"; MoE = $true
+        MoE = $true
     }
     '4' = @{
         Name = "Nemotron-3-Nano"; Context = "32k"; Category = "Deep Thinking"
         Path = "$LLM_DIR\Nemotron-3-Nano-30B-A3B-UD-Q8_K_XL.gguf"
-        VRAM = "~7GB"; MoE = $true
+        MoE = $true
     }
     '5' = @{
         Name = "GLM-4.6V-Flash"; Context = "131k"; Category = "Ultra Vision/Fast"
         Path = "$LLM_DIR\GLM-4.6V-Flash\GLM-4.6V-Flash-UD-Q4_K_XL.gguf"
-        VRAM = "~6GB"; MoE = $true
+        MoE = $true
     }
     '6' = @{
         Name = "MedGemma-1.5-4B"; Context = "16k"; Category = "Medical"
         Path = "$LLM_DIR\MedGemma-1.5\MedGemma-1.5-4b-it-UD-Q8_K_XL.gguf"
-        VRAM = "~5GB"; MoE = $false
+        MoE = $false
     }
     '7' = @{
         Name = "GPT-OSS-120B"; Context = "32k"; Category = "Heavy MoE"
         Path = "C:\Temp\gpt-oss-120b-mxfp4-00001-of-00003.gguf"
-        VRAM = "~8GB"; MoE = $true
+        MoE = $true
     }
     '8' = @{
         Name = "LFM2.5-1.2B"; Context = "32k"; Category = "Liquid AI Edge"
         Path = "$LLM_DIR\LFM2.5-1.2B-Instruct-BF16.gguf"
-        VRAM = "~2GB"; MoE = $false
+        MoE = $false
     }
 }
 
@@ -155,23 +155,130 @@ function Get-FileSize([string]$Path) {
     return "N/A"
 }
 
+function Get-ServerProcessesOnPort([int]$Port) {
+    $conns = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+    if (-not $conns) { return @() }
+    $processIds = $conns | Select-Object -Unique -ExpandProperty OwningProcess
+    $procs = @()
+    foreach ($processId in $processIds) {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($proc) { $procs += $proc }
+    }
+    return $procs
+}
+
 function Test-PortInUse([int]$Port) {
-    $conn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
-    return $null -ne $conn
+    return (Get-ServerProcessesOnPort -Port $Port).Count -gt 0
+}
+
+function Wait-ForPortOpen([int]$Port, [int]$TimeoutSeconds = 20) {
+    $start = Get-Date
+    while ((Get-Date) -lt $start.AddSeconds($TimeoutSeconds)) {
+        if (Test-PortInUse $Port) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Wait-ForPortClose([int]$Port, [int]$TimeoutSeconds = 15) {
+    $start = Get-Date
+    while ((Get-Date) -lt $start.AddSeconds($TimeoutSeconds)) {
+        if (-not (Test-PortInUse $Port)) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Write-PidFile([string]$Alias, [int]$ProcessId) {
+    $pidFile = "$LOG_DIR\${Alias}.pid"
+    $content = @{ pid = $ProcessId; started = (Get-Date).ToString('o') } | ConvertTo-Json
+    Set-Content -Path $pidFile -Value $content -Encoding UTF8 -Force
+}
+
+function Read-PidFile([string]$Alias) {
+    $pidFile = "$LOG_DIR\${Alias}.pid"
+    if (Test-Path $pidFile) {
+        try {
+            $obj = Get-Content $pidFile -Raw | ConvertFrom-Json
+            return $obj
+        } catch { return $null }
+    }
+    return $null
+}
+
+function Remove-PidFile([string]$Alias) {
+    $pidFile = "$LOG_DIR\${Alias}.pid"
+    if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
+}
+
+function Stop-ProcessGraceful([System.Diagnostics.Process]$proc, [int]$TimeoutSeconds = 5) {
+    if (-not $proc) { return $false }
+    if ($proc.HasExited) { return $true }
+
+    Write-Host "Attempting graceful stop of $($proc.ProcessName) (PID: $($proc.Id))..." -ForegroundColor Yellow
+    try {
+        # Try asking the process to exit cleanly
+        if ($proc.MainWindowHandle -ne 0) {
+            $proc.CloseMainWindow() | Out-Null
+            $waitStart = Get-Date
+            while (-not $proc.HasExited -and ((Get-Date) -lt $waitStart.AddSeconds($TimeoutSeconds))) {
+                Start-Sleep -Milliseconds 200
+                $proc.Refresh()
+            }
+            if ($proc.HasExited) { return $true }
+        }
+
+        # Fallback: try Stop-Process (gentle)
+        Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        $proc.Refresh()
+        if ($proc.HasExited) { return $true }
+
+        # Force kill as last resort
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        $proc.Refresh()
+        return -not $proc.HasExited
+    } catch {
+        return $false
+    }
 }
 
 function Stop-ServerOnPort([int]$Port) {
-    $conn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
-    if ($conn) {
-        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "Stopping $($proc.ProcessName) (PID: $($proc.Id)) on port $Port..." -ForegroundColor Yellow
-            Stop-Process -Id $proc.Id -Force
-            Start-Sleep -Seconds 1
-            return $true
+    $procs = Get-ServerProcessesOnPort -Port $Port
+    if (-not $procs -or $procs.Count -eq 0) { return $false }
+
+    $stoppedAny = $false
+    foreach ($proc in $procs) {
+        # Do not blindly kill unrelated processes - ensure it's our server executable before forcing
+        try {
+            if ($proc.Path -and ($proc.Path -ieq $SERVER_PATH -or ($proc.ProcessName -like '*llama*' -or $proc.ProcessName -like '*server*'))) {
+                $ok = Stop-ProcessGraceful -proc $proc -TimeoutSeconds 6
+                if ($ok) { $stoppedAny = $true }
+            } else {
+                # Attempt gentle stop but avoid force-killing system processes
+                $ok = Stop-ProcessGraceful -proc $proc -TimeoutSeconds 4
+                if ($ok) { $stoppedAny = $true }
+            }
+        } catch {
+            # ignore and continue
         }
     }
-    return $false
+
+    # Wait for port to close
+    if (Wait-ForPortClose -Port $Port -TimeoutSeconds 10) { return $stoppedAny }
+
+    # If still open, try force-killing any remaining owners
+    $procs = Get-ServerProcessesOnPort -Port $Port
+    foreach ($proc in $procs) {
+        try {
+            Write-Host "Force killing $($proc.ProcessName) (PID: $($proc.Id)) on port $Port..." -ForegroundColor Red
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $stoppedAny = $true
+        } catch { }
+    }
+
+    return $stoppedAny
 }
 
 function Show-Menu {
@@ -189,14 +296,19 @@ function Show-Menu {
         Write-Host -NoNewline "$key) $($m.Name.PadRight(20))"
         Write-Host -NoNewline "[$($m.Context.PadRight(5))] " -ForegroundColor DarkCyan
         Write-Host -NoNewline "$($m.Category.PadRight(18))" -ForegroundColor Gray
-        Write-Host -NoNewline "VRAM:$($m.VRAM.PadRight(6))" -ForegroundColor DarkYellow
         Write-Host -NoNewline "Size:$($size.PadRight(7))" -ForegroundColor DarkGray
         Write-Host $status -ForegroundColor $statusColor
     }
     
     Write-Host "----------------------------------------------------------"
     if (Test-PortInUse $DEFAULT_PORT) {
-        Write-Host "S) Stop server on port $DEFAULT_PORT" -ForegroundColor Red
+        $procs = Get-ServerProcessesOnPort $DEFAULT_PORT
+        if ($procs -and $procs.Count -gt 0) {
+            $p = $procs[0]
+            Write-Host "S) Stop server on port $DEFAULT_PORT - $($p.ProcessName) (PID: $($p.Id))" -ForegroundColor Red
+        } else {
+            Write-Host "S) Stop server on port $DEFAULT_PORT" -ForegroundColor Red
+        }
     }
     Write-Host "X) Exit"
     Write-Host "==========================================================" -ForegroundColor Cyan
@@ -219,14 +331,39 @@ function Start-LLMServer {
         return
     }
 
+    # Check for existing pid file and running process
+    $existing = Read-PidFile -Alias $Alias
+    if ($existing -and $existing.pid) {
+        try {
+            $p = Get-Process -Id $existing.pid -ErrorAction SilentlyContinue
+            if ($p -and -not $p.HasExited) {
+                Write-Host "Detected existing PID file for $Alias -> PID $($existing.pid)." -ForegroundColor Yellow
+                $resp = Read-Host "Stop existing process? [Y/N]"
+                if ($resp -eq 'Y' -or $resp -eq 'y') {
+                    Stop-ProcessGraceful -proc $p -TimeoutSeconds 6
+                    Remove-PidFile -Alias $Alias
+                } else {
+                    Write-Host "Aborting start." -ForegroundColor Yellow
+                    return
+                }
+            } else {
+                Remove-PidFile -Alias $Alias
+            }
+        } catch { Remove-PidFile -Alias $Alias }
+    }
+
     # Check if port is in use
     if (Test-PortInUse $DEFAULT_PORT) {
         Write-Host ""
         Write-Host "WARNING: Port $DEFAULT_PORT is already in use!" -ForegroundColor Yellow
         $response = Read-Host "Stop existing server? [Y/N]"
         if ($response -eq 'Y' -or $response -eq 'y') {
-            Stop-ServerOnPort $DEFAULT_PORT
+            if (-not (Stop-ServerOnPort $DEFAULT_PORT)) {
+                Write-Host "Failed to stop existing server on port $DEFAULT_PORT. Aborting." -ForegroundColor Red
+                return
+            }
         } else {
+            Write-Host "Aborting start due to port conflict." -ForegroundColor Yellow
             return
         }
     }
@@ -254,7 +391,32 @@ function Start-LLMServer {
     Write-Host ""
 
     try {
-        Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFile
+        $proc = Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFile -PassThru
+        if (-not $proc) { throw "Failed to obtain process object." }
+
+        # Write pidfile
+        Write-PidFile -Alias $Alias -ProcessId $proc.Id
+
+        # Wait for server to bind to port
+        if (Wait-ForPortOpen -Port $DEFAULT_PORT -TimeoutSeconds 20) {
+            Write-Host "Server started successfully: PID $($proc.Id)" -ForegroundColor Green
+            return
+        } else {
+            Write-Host "ERROR: Server did not bind to port $DEFAULT_PORT within timeout." -ForegroundColor Red
+            # Capture last lines of log for debugging
+            try {
+                Write-Host "----- Last 50 lines of log ($logFile) -----" -ForegroundColor DarkGray
+                Get-Content -Path $logFile -Tail 50 | ForEach-Object { Write-Host $_ }
+            } catch { }
+
+            # Attempt to stop process
+            if (-not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Remove-PidFile -Alias $Alias
+            Read-Host "Press Enter to continue"
+            return
+        }
     } catch {
         Write-Host "ERROR: Failed to start server: $_" -ForegroundColor Red
         Read-Host "Press Enter to continue"
@@ -268,8 +430,21 @@ do {
     switch ($choice) {
         { $_ -eq 'S' -or $_ -eq 's' } {
             if (Test-PortInUse $DEFAULT_PORT) {
-                Stop-ServerOnPort $DEFAULT_PORT
-                Write-Host "Server stopped." -ForegroundColor Green
+                if (Stop-ServerOnPort $DEFAULT_PORT) {
+                    Write-Host "Server stopped." -ForegroundColor Green
+                } else {
+                    Write-Host "WARNING: Stop attempt failed or required force. Please verify." -ForegroundColor Red
+                }
+
+                # Clean up stale PID files pointing to non-running processes
+                Get-ChildItem -Path $LOG_DIR -Filter '*.pid' -ErrorAction SilentlyContinue | ForEach-Object {
+                    try {
+                        $json = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                        if (-not (Get-Process -Id $json.pid -ErrorAction SilentlyContinue)) {
+                            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch { }
+                }
             } else {
                 Write-Host "No server running on port $DEFAULT_PORT" -ForegroundColor Yellow
             }
@@ -428,9 +603,8 @@ do {
         }
         '7' {
             # GUIDE: https://github.com/ggml-org/llama.cpp/discussions/15396
-            # GPT-OSS-120B: Heavy MoE model - requires ~64GB RAM, keep most on CPU
+            # GPT-OSS-120B: Heavy MoE model
             # OpenAI recommends: temp=1.0, top_p=1.0; use min_p=0.01 for performance
-            # For 8GB VRAM: --n-cpu-moe 35 keeps attention on GPU, experts on CPU
             Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'gpt-oss' -Arguments @(
                 '-m',        $MODELS['7'].Path
                 '--host',    '0.0.0.0'
