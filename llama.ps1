@@ -16,6 +16,7 @@
 # | Nemotron Reason   | 1.0  | 1.0   | -     | -     | -              |
 # | Nemotron Tools    | 0.6  | 0.95  | -     | -     | -              |
 # | GLM-4.6V-Flash    | 0.8  | 0.6   | 2     | 0.0   | 1.1            |
+# | GPT-OSS (OpenAI)  | 1.0  | 1.0   | -     | 0.01  | -              |
 # | General/Default   | 0.7  | 0.95  | 40    | 0.05  | -              |
 #
 # MOE LAYER OFFLOADING (for 8GB VRAM + high RAM setups):
@@ -49,6 +50,8 @@
 # Nemotron: Use enable_thinking=true for reasoning, false for faster non-reasoning responses
 # Qwen3-Thinking: Supports 256K context, recommend >131K for complex reasoning
 # Vision models: Require --mmproj for the vision encoder
+# GPT-OSS-120B: Requires ~64GB RAM. Use --n-cpu-moe 35 for 8GB VRAM. Avoid KV cache quant (hurts perf).
+#               min_p=0.0 causes 40% slowdown vs min_p=0.01
 #
 # DOCUMENTATION SOURCES:
 # ----------------------
@@ -263,16 +266,7 @@ do {
     $choice = Read-Host "Select a model [1-8, S, X]"
 
     switch ($choice) {
-        'S' {
-            if (Test-PortInUse $DEFAULT_PORT) {
-                Stop-ServerOnPort $DEFAULT_PORT
-                Write-Host "Server stopped." -ForegroundColor Green
-            } else {
-                Write-Host "No server running on port $DEFAULT_PORT" -ForegroundColor Yellow
-            }
-            Start-Sleep -Seconds 1
-        }
-        's' {
+        { $_ -eq 'S' -or $_ -eq 's' } {
             if (Test-PortInUse $DEFAULT_PORT) {
                 Stop-ServerOnPort $DEFAULT_PORT
                 Write-Host "Server stopped." -ForegroundColor Green
@@ -349,6 +343,8 @@ do {
                 '-t',        '8'
                 '-ctk',      'q4_0'
                 '-ctv',      'q4_0'
+                '-b',        '512'
+                '-np',       '2'
                 '--image-min-tokens', '1024'
                 '--temp',    '0.1'
                 '--top-p',   '0.95'
@@ -396,6 +392,7 @@ do {
                 '-c',        '131072'
                 '-ngl',      '99'
                 '--mlock'
+                '--n-cpu-moe','48'
                 '-t',        '8'
                 '-ctk',      'q4_0'
                 '-ctv',      'q4_0'
@@ -414,7 +411,7 @@ do {
             # GUIDE: https://huggingface.co/unsloth/medgemma-1.5-4b-it
             Start-LLMServer -ModelPath $MODELS['6'].Path -Alias 'medgemma' -Arguments @(
                 '-m',        $MODELS['6'].Path
-                '--mmproj',  "$LLM_DIR\mmproj-F16.gguf"
+                '--mmproj',  "$LLM_DIR\MedGemma-1.5\mmproj-F16.gguf"
                 '--host',    '0.0.0.0'
                 '--port',    $DEFAULT_PORT
                 '-fa',       'on'
@@ -430,8 +427,10 @@ do {
             )
         }
         '7' {
-            # GUIDE: https://github.com/openai/gpt-oss
-            # Heavy MoE model - offload experts to CPU for better GPU utilization
+            # GUIDE: https://github.com/ggml-org/llama.cpp/discussions/15396
+            # GPT-OSS-120B: Heavy MoE model - requires ~64GB RAM, keep most on CPU
+            # OpenAI recommends: temp=1.0, top_p=1.0; use min_p=0.01 for performance
+            # For 8GB VRAM: --n-cpu-moe 35 keeps attention on GPU, experts on CPU
             Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'gpt-oss' -Arguments @(
                 '-m',        $MODELS['7'].Path
                 '--host',    '0.0.0.0'
@@ -439,15 +438,15 @@ do {
                 '-fa',       'on'
                 '-c',        '32768'
                 '-ngl',      '99'
-                '--n-cpu-moe','62'
+                '--mlock'
+                '--no-mmap'
+                '--n-cpu-moe','35'
                 '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '--temp',    '0.7'
-                '--top-p',   '0.95'
-                '--min-p',   '0.05'
-                '-ot',       '.ffn_.*_exps.=CPU'
+                '-b',        '2048'
+                '-ub',       '2048'
+                '--temp',    '1.0'
+                '--top-p',   '1.0'
+                '--min-p',   '0.01'
                 '--jinja'
                 '--alias',   'gpt-oss'
             )
@@ -471,7 +470,6 @@ do {
                 '--alias',   'lfm-edge'
             )
         }
-        'X' { return }
-        'x' { return }
+        { $_ -eq 'X' -or $_ -eq 'x' } { return }
     }
-} while ($choice -ne 'X' -and $choice -ne 'x')
+} while ($choice -notin @('X', 'x'))
