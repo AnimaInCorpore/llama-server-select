@@ -378,12 +378,14 @@ function Start-LLMServer {
     # Generate log filename
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $logFile = "$LOG_DIR\${Alias}_$timestamp.log"
+    $logFileErr = "$LOG_DIR\${Alias}_$timestamp.err.log"
 
     Write-Host ""
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host "Starting: $Alias" -ForegroundColor Green
     Write-Host "Model: $ModelPath" -ForegroundColor DarkGray
-    Write-Host "Log: $logFile" -ForegroundColor DarkGray
+    Write-Host "Log (Out): $logFile" -ForegroundColor DarkGray
+    Write-Host "Log (Err): $logFileErr" -ForegroundColor DarkGray
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Server arguments:" -ForegroundColor Cyan
@@ -391,7 +393,7 @@ function Start-LLMServer {
     Write-Host ""
 
     try {
-        $proc = Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFile -PassThru
+        $proc = Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFileErr -PassThru
         if (-not $proc) { throw "Failed to obtain process object." }
 
         # Write pidfile
@@ -405,8 +407,10 @@ function Start-LLMServer {
             Write-Host "ERROR: Server did not bind to port $DEFAULT_PORT within timeout." -ForegroundColor Red
             # Capture last lines of log for debugging
             try {
-                Write-Host "----- Last 50 lines of log ($logFile) -----" -ForegroundColor DarkGray
-                Get-Content -Path $logFile -Tail 50 | ForEach-Object { Write-Host $_ }
+                Write-Host "----- Last 20 lines of OUTPUT ($logFile) -----" -ForegroundColor DarkGray
+                Get-Content -Path $logFile -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+                Write-Host "----- Last 20 lines of ERRORS ($logFileErr) -----" -ForegroundColor Red
+                Get-Content -Path $logFileErr -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
             } catch { }
 
             # Attempt to stop process
