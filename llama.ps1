@@ -46,7 +46,7 @@
 #
 # MODEL-SPECIFIC NOTES:
 # ---------------------
-# GLM-4.6V: May reason in Chinese. Use: --system-prompt "Respond in English and reason in English"
+# GLM-4.6V: May reason in Chinese. Use: --chat-template-kwargs '{"system":"Respond in English and reason in English"}'
 # Nemotron: Use enable_thinking=true for reasoning, false for faster non-reasoning responses
 # Qwen3-Thinking: Supports 256K context, recommend >131K for complex reasoning
 # Vision models: Require --mmproj for the vision encoder
@@ -60,6 +60,7 @@
 # Qwen3-VL:       https://huggingface.co/unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF
 # Nemotron:       https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B
 # GLM-4.6:        https://unsloth.ai/docs/models/glm-4.6-how-to-run-locally
+# GLM-4.7:        https://unsloth.ai/docs/models/glm-4.7-flash
 # LFM2.5:         https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF
 # llama.cpp:      https://github.com/ggml-org/llama.cpp/blob/master/examples/server/README.md
 #
@@ -75,6 +76,7 @@ $SERVER_PATH = "C:\Temp\llama.cpp\build\bin\llama-server.exe"
 $LLM_DIR = "H:\LLM"
 $DEFAULT_PORT = 8080
 $LOG_DIR = "$PSScriptRoot\logs"
+$FIT_MODE = 'on'  # set to 'off' to disable auto-fit
 # ---------------------
 
 # Ensure log directory exists
@@ -145,7 +147,24 @@ $MODELS = @{
         Path = "$LLM_DIR\LFM2.5-1.2B-Instruct-BF16.gguf"
         MoE = $false
     }
+    '9' = @{
+        Name = "GLM-4.7-Flash"; Context = "16k"; Category = "Fast General"
+        Path = "$LLM_DIR\GLM-4.7-Flash-UD-Q8_K_XL.gguf"
+        MoE = $false
+    }
 }
+
+# Common CLI args to reduce duplication
+$COMMON_ARGS = @(
+    '--host',         '0.0.0.0'
+    '--port',         $DEFAULT_PORT
+    '--fit',          $FIT_MODE
+    '--flash-attn',   'on'
+    '--n-gpu-layers', '99'
+    '--mlock'
+    '--threads',      '8'
+    '--jinja'
+)
 
 function Get-FileSize([string]$Path) {
     if (Test-Path $Path) {
@@ -211,75 +230,6 @@ function Remove-PidFile([string]$Alias) {
     if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
 }
 
-function Stop-ProcessGraceful([System.Diagnostics.Process]$proc, [int]$TimeoutSeconds = 5) {
-    if (-not $proc) { return $false }
-    if ($proc.HasExited) { return $true }
-
-    Write-Host "Attempting graceful stop of $($proc.ProcessName) (PID: $($proc.Id))..." -ForegroundColor Yellow
-    try {
-        # Try asking the process to exit cleanly
-        if ($proc.MainWindowHandle -ne 0) {
-            $proc.CloseMainWindow() | Out-Null
-            $waitStart = Get-Date
-            while (-not $proc.HasExited -and ((Get-Date) -lt $waitStart.AddSeconds($TimeoutSeconds))) {
-                Start-Sleep -Milliseconds 200
-                $proc.Refresh()
-            }
-            if ($proc.HasExited) { return $true }
-        }
-
-        # Fallback: try Stop-Process (gentle)
-        Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-        $proc.Refresh()
-        if ($proc.HasExited) { return $true }
-
-        # Force kill as last resort
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-        $proc.Refresh()
-        return -not $proc.HasExited
-    } catch {
-        return $false
-    }
-}
-
-function Stop-ServerOnPort([int]$Port) {
-    $procs = Get-ServerProcessesOnPort -Port $Port
-    if (-not $procs -or $procs.Count -eq 0) { return $false }
-
-    $stoppedAny = $false
-    foreach ($proc in $procs) {
-        # Do not blindly kill unrelated processes - ensure it's our server executable before forcing
-        try {
-            if ($proc.Path -and ($proc.Path -ieq $SERVER_PATH -or ($proc.ProcessName -like '*llama*' -or $proc.ProcessName -like '*server*'))) {
-                $ok = Stop-ProcessGraceful -proc $proc -TimeoutSeconds 6
-                if ($ok) { $stoppedAny = $true }
-            } else {
-                # Attempt gentle stop but avoid force-killing system processes
-                $ok = Stop-ProcessGraceful -proc $proc -TimeoutSeconds 4
-                if ($ok) { $stoppedAny = $true }
-            }
-        } catch {
-            # ignore and continue
-        }
-    }
-
-    # Wait for port to close
-    if (Wait-ForPortClose -Port $Port -TimeoutSeconds 10) { return $stoppedAny }
-
-    # If still open, try force-killing any remaining owners
-    $procs = Get-ServerProcessesOnPort -Port $Port
-    foreach ($proc in $procs) {
-        try {
-            Write-Host "Force killing $($proc.ProcessName) (PID: $($proc.Id)) on port $Port..." -ForegroundColor Red
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            $stoppedAny = $true
-        } catch { }
-    }
-
-    return $stoppedAny
-}
 
 function Show-Menu {
     Clear-Host
@@ -300,16 +250,6 @@ function Show-Menu {
         Write-Host $status -ForegroundColor $statusColor
     }
     
-    Write-Host "----------------------------------------------------------"
-    if (Test-PortInUse $DEFAULT_PORT) {
-        $procs = Get-ServerProcessesOnPort $DEFAULT_PORT
-        if ($procs -and $procs.Count -gt 0) {
-            $p = $procs[0]
-            Write-Host "S) Stop server on port $DEFAULT_PORT - $($p.ProcessName) (PID: $($p.Id))" -ForegroundColor Red
-        } else {
-            Write-Host "S) Stop server on port $DEFAULT_PORT" -ForegroundColor Red
-        }
-    }
     Write-Host "X) Exit"
     Write-Host "==========================================================" -ForegroundColor Cyan
 }
@@ -321,7 +261,7 @@ function Start-LLMServer {
         [string[]]$Arguments
     )
 
-    # Validate model file exists
+    # 1. Validate model file exists
     if (-not (Test-Path $ModelPath)) {
         Write-Host ""
         Write-Host "ERROR: Model file not found!" -ForegroundColor Red
@@ -331,43 +271,32 @@ function Start-LLMServer {
         return
     }
 
-    # Check for existing pid file and running process
-    $existing = Read-PidFile -Alias $Alias
-    if ($existing -and $existing.pid) {
-        try {
-            $p = Get-Process -Id $existing.pid -ErrorAction SilentlyContinue
-            if ($p -and -not $p.HasExited) {
-                Write-Host "Detected existing PID file for $Alias -> PID $($existing.pid)." -ForegroundColor Yellow
-                $resp = Read-Host "Stop existing process? [Y/N]"
-                if ($resp -eq 'Y' -or $resp -eq 'y') {
-                    Stop-ProcessGraceful -proc $p -TimeoutSeconds 6
-                    Remove-PidFile -Alias $Alias
-                } else {
-                    Write-Host "Aborting start." -ForegroundColor Yellow
-                    return
-                }
-            } else {
-                Remove-PidFile -Alias $Alias
-            }
-        } catch { Remove-PidFile -Alias $Alias }
-    }
-
-    # Check if port is in use
+    # 2. Check for port conflicts (Zombie processes)
     if (Test-PortInUse $DEFAULT_PORT) {
-        Write-Host ""
-        Write-Host "WARNING: Port $DEFAULT_PORT is already in use!" -ForegroundColor Yellow
-        $response = Read-Host "Stop existing server? [Y/N]"
-        if ($response -eq 'Y' -or $response -eq 'y') {
-            if (-not (Stop-ServerOnPort $DEFAULT_PORT)) {
-                Write-Host "Failed to stop existing server on port $DEFAULT_PORT. Aborting." -ForegroundColor Red
+        Write-Host "Port $DEFAULT_PORT is already in use. Checking for existing processes..." -ForegroundColor Yellow
+        $procs = Get-ServerProcessesOnPort -Port $DEFAULT_PORT
+        
+        if ($procs) {
+            foreach ($p in $procs) {
+                Write-Host "Killing existing server process (PID: $($p.Id))..." -ForegroundColor DarkYellow
+                Stop-Process -InputObject $p -Force -ErrorAction SilentlyContinue
+            }
+            # Wait for port to clear
+            if (-not (Wait-ForPortClose -Port $DEFAULT_PORT -TimeoutSeconds 5)) {
+                Write-Host "ERROR: Could not release port $DEFAULT_PORT. Please kill the process manually." -ForegroundColor Red
+                Read-Host "Press Enter to continue"
                 return
             }
+            Write-Host "Port released." -ForegroundColor Green
         } else {
-            Write-Host "Aborting start due to port conflict." -ForegroundColor Yellow
-            return
+             Write-Host "WARNING: Port $DEFAULT_PORT is in use by a process we cannot identify or access." -ForegroundColor Red
+             Write-Host "Please close the application using port $DEFAULT_PORT manually." -ForegroundColor Red
+             Read-Host "Press Enter to continue"
+             return
         }
     }
 
+    # 3. Prepare Arguments
     # Append API key only if it exists
     if ($env:LLM_API_KEY) {
         $allArgs = @($Arguments + @('--api-key', $env:LLM_API_KEY))
@@ -377,53 +306,46 @@ function Start-LLMServer {
 
     # Generate log filename
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $logFile = "$LOG_DIR\${Alias}_$timestamp.log"
-    $logFileErr = "$LOG_DIR\${Alias}_$timestamp.err.log"
-
+    $logFile = "$LOG_DIR\${Alias}_${timestamp}.log"
+    
     Write-Host ""
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host "Starting: $Alias" -ForegroundColor Green
     Write-Host "Model: $ModelPath" -ForegroundColor DarkGray
-    Write-Host "Log (Out): $logFile" -ForegroundColor DarkGray
-    Write-Host "Log (Err): $logFileErr" -ForegroundColor DarkGray
+    Write-Host "Log: $logFile" -ForegroundColor DarkGray
     Write-Host "==========================================================" -ForegroundColor Green
     Write-Host ""
+
     Write-Host "Server arguments:" -ForegroundColor Cyan
     $allArgs -join ' ' | Write-Host
+    $cmdLine = '"{0}" {1}' -f $SERVER_PATH, (($allArgs | ForEach-Object {
+        if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ }
+    }) -join ' ')
+    Write-Host "Command line:" -ForegroundColor Cyan
+    Write-Host $cmdLine
     Write-Host ""
-
+    
+    # 4. Start Server
+    # We use Start-Process to keep it clean, but wait-process to block 
+    # so the user can see the output in this window if they want, 
+    # OR we can run it inside the current console. 
+    # Given the 'Manager' nature, running inside the console with '&' is best for visibility,
+    # but we wrap it to ensure we catch exit codes.
+    
     try {
-        $proc = Start-Process -FilePath $SERVER_PATH -ArgumentList $allArgs -NoNewWindow -RedirectStandardOutput $logFile -RedirectStandardError $logFileErr -PassThru
-        if (-not $proc) { throw "Failed to obtain process object." }
-
-        # Write pidfile
-        Write-PidFile -Alias $Alias -ProcessId $proc.Id
-
-        # Wait for server to bind to port
-        if (Wait-ForPortOpen -Port $DEFAULT_PORT -TimeoutSeconds 20) {
-            Write-Host "Server started successfully: PID $($proc.Id)" -ForegroundColor Green
-            return
-        } else {
-            Write-Host "ERROR: Server did not bind to port $DEFAULT_PORT within timeout." -ForegroundColor Red
-            # Capture last lines of log for debugging
-            try {
-                Write-Host "----- Last 20 lines of OUTPUT ($logFile) -----" -ForegroundColor DarkGray
-                Get-Content -Path $logFile -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-                Write-Host "----- Last 20 lines of ERRORS ($logFileErr) -----" -ForegroundColor Red
-                Get-Content -Path $logFileErr -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
-            } catch { }
-
-            # Attempt to stop process
-            if (-not $proc.HasExited) {
-                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            }
-            Remove-PidFile -Alias $Alias
-            Read-Host "Press Enter to continue"
-            return
-        }
+        # Track PID for "Manager" logic if we decide to go non-blocking later
+        Write-PidFile -Alias $Alias -ProcessId $PID 
+        
+        # Run the server (Blocking)
+        & $SERVER_PATH @($allArgs) 2>&1 | Tee-Object -FilePath $logFile
+        
     } catch {
-        Write-Host "ERROR: Failed to start server: $_" -ForegroundColor Red
-        Read-Host "Press Enter to continue"
+        Write-Host "ERROR: Server crashed or failed to start: $_" -ForegroundColor Red
+    } finally {
+        Remove-PidFile -Alias $Alias
+        Write-Host ""
+        Write-Host "Server stopped." -ForegroundColor Yellow
+        Read-Host "Press Enter to return to menu"
     }
 }
 
@@ -436,55 +358,28 @@ do {
     # -------------------------------------------------------------------------
 
     Show-Menu
-    $choice = Read-Host "Select a model [1-8, S, X]"
+    $choice = Read-Host "Select a model [1-9, X]"
 
     switch ($choice) {
-        { $_ -eq 'S' -or $_ -eq 's' } {
-            if (Test-PortInUse $DEFAULT_PORT) {
-                if (Stop-ServerOnPort $DEFAULT_PORT) {
-                    Write-Host "Server stopped." -ForegroundColor Green
-                } else {
-                    Write-Host "WARNING: Stop attempt failed or required force. Please verify." -ForegroundColor Red
-                }
-
-                # Clean up stale PID files pointing to non-running processes
-                Get-ChildItem -Path $LOG_DIR -Filter '*.pid' -ErrorAction SilentlyContinue | ForEach-Object {
-                    try {
-                        $json = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                        if (-not (Get-Process -Id $json.pid -ErrorAction SilentlyContinue)) {
-                            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                        }
-                    } catch { }
-                }
-            } else {
-                Write-Host "No server running on port $DEFAULT_PORT" -ForegroundColor Yellow
-            }
-            Start-Sleep -Seconds 1
-        }
         '1' {
             # GUIDE: https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct
             # Best Practices: temp=0.7, top_p=0.8, top_k=20, repetition_penalty=1.05
             Start-LLMServer -ModelPath $MODELS['1'].Path -Alias 'qwen3-coder' -Arguments @(
-                '-m',        $MODELS['1'].Path
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '65536'
-                '-ngl',      '99'
-                '--mlock'
-                '--n-cpu-moe','48'
-                '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '-np',       '2'
-                '--temp',    '0.7'
-                '--top-p',   '0.8'
-                '--top-k',   '20'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['1'].Path
+                '--ctx-size',     '65536'
+                '--n-cpu-moe',    '48'
+                '--cache-type-k', 'q4_0'
+                '--cache-type-v', 'q4_0'
+                '--batch-size',   '512'
+                '--parallel',     '2'
+                '--temp',         '0.7'
+                '--top-p',        '0.8'
+                '--top-k',        '20'
                 '--repeat-penalty', '1.05'
-                '-ot',       '.ffn_.*_exps.=CPU'
-                '--jinja'
-                '--alias',   'qwen3-coder'
+                '-ot',            '.ffn_.*_exps.=CPU'
+                '--alias',        'qwen3-coder'
+                )
             )
         }
         '2' {
@@ -492,54 +387,44 @@ do {
             # Best Practices: temp=0.6, top_p=0.95, top_k=20, min_p=0
             # CRITICAL: min_p=0 prevents cutting off low-probability reasoning tokens.
             Start-LLMServer -ModelPath $MODELS['2'].Path -Alias 'qwen3-thinking' -Arguments @(
-                '-m',        $MODELS['2'].Path
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '32768'
-                '-ngl',      '99'
-                '--mlock'
-                '--n-cpu-moe','48'
-                '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '-np',       '2'
-                '--temp',    '0.6'
-                '--top-p',   '0.95'
-                '--top-k',   '20'
-                '--min-p',   '0'
-                '-ot',       '.ffn_.*_exps.=CPU'
-                '--jinja'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['2'].Path
+                '--ctx-size',     '65536'
+                '--n-cpu-moe',    '48'
+                '--cache-type-k', 'q4_0'
+                '--cache-type-v', 'q4_0'
+                '--batch-size',   '512'
+                '--parallel',     '2'
+                '--temp',         '0.6'
+                '--top-p',        '0.95'
+                '--top-k',        '20'
+                '--min-p',        '0'
+                '-ot',            '.ffn_.*_exps.=CPU'
                 '--chat-template-kwargs', '{"enable_thinking":true}'
-                '--alias',   'qwen3-thinking'
+                '--alias',        'qwen3-thinking'
+                )
             )
         }
         '3' {
             # GUIDE: https://huggingface.co/unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF
             # Vision model - keep temp low for accuracy
             Start-LLMServer -ModelPath $MODELS['3'].Path -Alias 'qwen3-vl' -Arguments @(
-                '-m',        $MODELS['3'].Path
-                '--mmproj',  "$LLM_DIR\Qwen3-VL-Instruct\mmproj-F16.gguf"
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '65536'
-                '-ngl',      '99'
-                '--mlock'
-                '--n-cpu-moe','48'
-                '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '-np',       '2'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['3'].Path
+                '--mmproj',       "$LLM_DIR\Qwen3-VL-Instruct\mmproj-F16.gguf"
+                '--ctx-size',     '131072'
+                '--n-cpu-moe',    '48'
+                '--cache-type-k', 'q4_0'
+                '--cache-type-v', 'q4_0'
+                '--batch-size',   '512'
+                '--parallel',     '2'
                 '--image-min-tokens', '1024'
-                '--temp',    '0.1'
-                '--top-p',   '0.95'
-                '--top-k',   '20'
-                '-ot',       '.ffn_.*_exps.=CPU'
-                '--jinja'
-                '--alias',   'qwen3-vl'
+                '--temp',         '0.1'
+                '--top-p',        '0.95'
+                '--top-k',        '20'
+                '-ot',            '.ffn_.*_exps.=CPU'
+                '--alias',        'qwen3-vl'
+                )
             )
         }
         '4' {
@@ -547,25 +432,20 @@ do {
             # NVIDIA recommends: temp=1.0, top_p=1.0 for reasoning; temp=0.6, top_p=0.95 for tool calling
             $kwargs = '{"enable_thinking":true}'
             Start-LLMServer -ModelPath $MODELS['4'].Path -Alias 'nemotron' -Arguments @(
-                '-m',        $MODELS['4'].Path
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '32768'
-                '-ngl',      '99'
-                '--mlock'
-                '--n-cpu-moe','48'
-                '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '-np',       '2'
-                '--temp',    '1.0'
-                '--top-p',   '1.0'
-                '-ot',       '.ffn_.*_exps.=CPU'
-                '--jinja'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['4'].Path
+                '--ctx-size',     '32768'
+                '--n-cpu-moe',    '48'
+                '--cache-type-k', 'q4_0'
+                '--cache-type-v', 'q4_0'
+                '--batch-size',   '512'
+                '--parallel',     '2'
+                '--temp',         '1.0'
+                '--top-p',        '1.0'
+                '-ot',            '.ffn_.*_exps.=CPU'
                 '--chat-template-kwargs', $kwargs
-                '--alias',   'nemotron'
+                '--alias',        'nemotron'
+                )
             )
         }
         '5' {
@@ -573,46 +453,36 @@ do {
             # Recommended: temp=1.0, top_p=0.95, top_k=40
             # System prompt is vital to force English reasoning
             Start-LLMServer -ModelPath $MODELS['5'].Path -Alias 'glm-flash' -Arguments @(
-                '-m',        $MODELS['5'].Path
-                '--mmproj',  "$LLM_DIR\GLM-4.6V-Flash\mmproj-F16.gguf"
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '131072'
-                '-ngl',      '99'
-                '--mlock'
-                '--n-cpu-moe','48'
-                '-t',        '8'
-                '-ctk',      'q4_0'
-                '-ctv',      'q4_0'
-                '-b',        '512'
-                '--temp',    '1.0'
-                '--top-p',   '0.95'
-                '--top-k',   '40'
-                '--min-p',   '0.0'
-                '--system-prompt', 'Respond in English and reason in English'
-                '-ot',       '.ffn_.*_exps.=CPU'
-                '--jinja'
-                '--alias',   'glm-flash'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['5'].Path
+                '--mmproj',       "$LLM_DIR\GLM-4.6V-Flash\mmproj-F16.gguf"
+                '--ctx-size',     '131072'
+                '--n-cpu-moe',    '48'
+                '--cache-type-k', 'q4_0'
+                '--cache-type-v', 'q4_0'
+                '--batch-size',   '512'
+                '--temp',         '1.0'
+                '--top-p',        '0.95'
+                '--top-k',        '40'
+                '--min-p',        '0.0'
+                '--chat-template-kwargs', '{"system":"Respond in English and reason in English"}'
+                '-ot',            '.ffn_.*_exps.=CPU'
+                '--alias',        'glm-flash'
+                )
             )
         }
         '6' {
             # GUIDE: https://huggingface.co/unsloth/medgemma-1.5-4b-it
             Start-LLMServer -ModelPath $MODELS['6'].Path -Alias 'medgemma' -Arguments @(
-                '-m',        $MODELS['6'].Path
-                '--mmproj',  "$LLM_DIR\MedGemma-1.5\mmproj-F16.gguf"
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '16384'
-                '-ngl',      '99'
-                '--mlock'
-                '-t',        '8'
-                '-b',        '512'
-                '-np',       '4'
-                '--temp',    '0.2'
-                '--jinja'
-                '--alias',   'medgemma'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['6'].Path
+                '--mmproj',       "$LLM_DIR\MedGemma-1.5\mmproj-F16.gguf"
+                '--ctx-size',     '16384'
+                '--batch-size',   '512'
+                '--parallel',     '4'
+                '--temp',         '0.2'
+                '--alias',        'medgemma'
+                )
             )
         }
         '7' {
@@ -621,24 +491,19 @@ do {
             # CRITICAL: Top-K forced to 0 (disabled) to avoid performance kill.
             # OPTIMIZATION: min_p=0 for accuracy (slower) vs min_p=0.01 for speed.
             Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'gpt-oss' -Arguments @(
-                '-m',        $MODELS['7'].Path
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '32768'
-                '-ngl',      '99'
-                '--mlock'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['7'].Path
+                '--ctx-size',     '32768'
                 '--no-mmap'
-                '--n-cpu-moe','35'
-                '-t',        '8'
-                '-b',        '2048'
-                '-ub',       '2048'
-                '--temp',    '1.0'
-                '--top-p',   '1.0'
-                '--top-k',   '0'
-                '--min-p',   '0'
-                '--jinja'
-                '--alias',   'gpt-oss'
+                '--n-cpu-moe',    '35'
+                '--batch-size',   '2048'
+                '--ubatch-size',  '2048'
+                '--temp',         '1.0'
+                '--top-p',        '1.0'
+                '--top-k',        '0'
+                '--min-p',        '0'
+                '--alias',        'gpt-oss'
+                )
             )
         }
         '8' {
@@ -646,20 +511,32 @@ do {
             # Edge Model (1.2B). Optimized for low-latency on-device use.
             # Best Practice: Keep temperature low (0.1) for stability.
             Start-LLMServer -ModelPath $MODELS['8'].Path -Alias 'lfm-edge' -Arguments @(
-                '-m',        $MODELS['8'].Path
-                '--host',    '0.0.0.0'
-                '--port',    $DEFAULT_PORT
-                '-fa',       'on'
-                '-c',        '32768'
-                '-ngl',      '99'
-                '--mlock'
-                '-t',        '8'
-                '-b',        '1024'
-                '-ub',       '1024'
-                '-np',       '4'
-                '--temp',    '0.1'
-                '--jinja'
-                '--alias',   'lfm-edge'
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['8'].Path
+                '--ctx-size',     '32768'
+                '--batch-size',   '1024'
+                '--ubatch-size',  '1024'
+                '--parallel',     '4'
+                '--temp',         '0.1'
+                '--alias',        'lfm-edge'
+                )
+            )
+        }
+        '9' {
+            Start-LLMServer -ModelPath $MODELS['9'].Path -Alias 'glm-4.7-flash' -Arguments @(
+                $COMMON_ARGS + @(
+                '--model',        $MODELS['9'].Path
+                '--ctx-size',     '16384'
+                '--n-gpu-layers', '16'
+                '--batch-size',   '512'
+                '--ubatch-size',  '128'
+                '--temp',         '0.2'
+                '--top-k',        '50'
+                '--top-p',        '0.95'
+                '--min-p',        '0.01'
+                '--dry-multiplier', '1.1'
+                '--alias',        'glm-4.7-flash'
+                )
             )
         }
         { $_ -eq 'X' -or $_ -eq 'x' } { return }
