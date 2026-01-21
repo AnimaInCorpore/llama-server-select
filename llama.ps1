@@ -15,7 +15,6 @@
 # | Qwen3-VL (Vision) | 0.1  | 0.95  | 20    | -     | -              |
 # | Nemotron Reason   | 1.0  | 1.0   | -     | -     | -              |
 # | Nemotron Tools    | 0.6  | 0.95  | -     | -     | -              |
-# | GLM-4.6V-Flash    | 0.8  | 0.6   | 2     | 0.0   | 1.1            |
 # | GPT-OSS (OpenAI)  | 1.0  | 1.0   | -     | 0.01  | -              |
 # | General/Default   | 0.7  | 0.95  | 40    | 0.05  | -              |
 #
@@ -46,7 +45,6 @@
 #
 # MODEL-SPECIFIC NOTES:
 # ---------------------
-# GLM-4.6V: May reason in Chinese. Use: --chat-template-kwargs '{"system":"Respond in English and reason in English"}'
 # Nemotron: Use enable_thinking=true for reasoning, false for faster non-reasoning responses
 # Qwen3-Thinking: Supports 256K context, recommend >131K for complex reasoning
 # Vision models: Require --mmproj for the vision encoder
@@ -59,7 +57,6 @@
 # Qwen3-Thinking: https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF
 # Qwen3-VL:       https://huggingface.co/unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF
 # Nemotron:       https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B
-# GLM-4.6:        https://unsloth.ai/docs/models/glm-4.6-how-to-run-locally
 # GLM-4.7:        https://unsloth.ai/docs/models/glm-4.7-flash
 # LFM2.5:         https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF
 # llama.cpp:      https://github.com/ggml-org/llama.cpp/blob/master/examples/server/README.md
@@ -128,28 +125,23 @@ $MODELS = @{
         MoE = $true
     }
     '5' = @{
-        Name = "GLM-4.6V-Flash"; Context = "131k"; Category = "Ultra Vision/Fast"
-        Path = "$LLM_DIR\GLM-4.6V-Flash\GLM-4.6V-Flash-UD-Q4_K_XL.gguf"
-        MoE = $true
-    }
-    '6' = @{
         Name = "MedGemma-1.5-4B"; Context = "16k"; Category = "Medical"
         Path = "$LLM_DIR\MedGemma-1.5\MedGemma-1.5-4b-it-UD-Q8_K_XL.gguf"
         MoE = $false
     }
-    '7' = @{
+    '6' = @{
         Name = "GPT-OSS-120B"; Context = "32k"; Category = "Heavy MoE"
         Path = "C:\Temp\gpt-oss-120b-mxfp4-00001-of-00003.gguf"
         MoE = $true
     }
-    '8' = @{
+    '7' = @{
         Name = "LFM2.5-1.2B"; Context = "32k"; Category = "Liquid AI Edge"
         Path = "$LLM_DIR\LFM2.5-1.2B-Instruct-BF16.gguf"
         MoE = $false
     }
-    '9' = @{
+    '8' = @{
         Name = "GLM-4.7-Flash"; Context = "16k"; Category = "Fast General"
-        Path = "$LLM_DIR\GLM-4.7-Flash-UD-Q8_K_XL.gguf"
+        Path = "$LLM_DIR\GLM-4.7-Flash-UD-Q4_K_XL.gguf"
         MoE = $false
     }
 }
@@ -358,7 +350,7 @@ do {
     # -------------------------------------------------------------------------
 
     Show-Menu
-    $choice = Read-Host "Select a model [1-9, X]"
+    $choice = Read-Host "Select a model [1-8, X]"
 
     switch ($choice) {
         '1' {
@@ -449,33 +441,10 @@ do {
             )
         }
         '5' {
-            # GUIDE: https://docs.unsloth.ai/models/glm-4.6-how-to-run-locally
-            # Recommended: temp=1.0, top_p=0.95, top_k=40
-            # System prompt is vital to force English reasoning
-            Start-LLMServer -ModelPath $MODELS['5'].Path -Alias 'glm-flash' -Arguments @(
+            # GUIDE: https://huggingface.co/unsloth/medgemma-1.5-4b-it
+            Start-LLMServer -ModelPath $MODELS['5'].Path -Alias 'medgemma' -Arguments @(
                 $COMMON_ARGS + @(
                 '--model',        $MODELS['5'].Path
-                '--mmproj',       "$LLM_DIR\GLM-4.6V-Flash\mmproj-F16.gguf"
-                '--ctx-size',     '131072'
-                '--n-cpu-moe',    '48'
-                '--cache-type-k', 'q4_0'
-                '--cache-type-v', 'q4_0'
-                '--batch-size',   '512'
-                '--temp',         '1.0'
-                '--top-p',        '0.95'
-                '--top-k',        '40'
-                '--min-p',        '0.0'
-                '--chat-template-kwargs', '{"system":"Respond in English and reason in English"}'
-                '-ot',            '.ffn_.*_exps.=CPU'
-                '--alias',        'glm-flash'
-                )
-            )
-        }
-        '6' {
-            # GUIDE: https://huggingface.co/unsloth/medgemma-1.5-4b-it
-            Start-LLMServer -ModelPath $MODELS['6'].Path -Alias 'medgemma' -Arguments @(
-                $COMMON_ARGS + @(
-                '--model',        $MODELS['6'].Path
                 '--mmproj',       "$LLM_DIR\MedGemma-1.5\mmproj-F16.gguf"
                 '--ctx-size',     '16384'
                 '--batch-size',   '512'
@@ -485,14 +454,14 @@ do {
                 )
             )
         }
-        '7' {
+        '6' {
             # GUIDE: https://github.com/ggml-org/llama.cpp/discussions/15396
             # GPT-OSS-120B: Heavy MoE model (requires aggressive offloading)
             # CRITICAL: Top-K forced to 0 (disabled) to avoid performance kill.
             # OPTIMIZATION: min_p=0 for accuracy (slower) vs min_p=0.01 for speed.
-            Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'gpt-oss' -Arguments @(
+            Start-LLMServer -ModelPath $MODELS['6'].Path -Alias 'gpt-oss' -Arguments @(
                 $COMMON_ARGS + @(
-                '--model',        $MODELS['7'].Path
+                '--model',        $MODELS['6'].Path
                 '--ctx-size',     '32768'
                 '--no-mmap'
                 '--n-cpu-moe',    '35'
@@ -506,13 +475,13 @@ do {
                 )
             )
         }
-        '8' {
+        '7' {
             # GUIDE: https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF
             # Edge Model (1.2B). Optimized for low-latency on-device use.
             # Best Practice: Keep temperature low (0.1) for stability.
-            Start-LLMServer -ModelPath $MODELS['8'].Path -Alias 'lfm-edge' -Arguments @(
+            Start-LLMServer -ModelPath $MODELS['7'].Path -Alias 'lfm-edge' -Arguments @(
                 $COMMON_ARGS + @(
-                '--model',        $MODELS['8'].Path
+                '--model',        $MODELS['7'].Path
                 '--ctx-size',     '32768'
                 '--batch-size',   '1024'
                 '--ubatch-size',  '1024'
@@ -522,20 +491,18 @@ do {
                 )
             )
         }
-        '9' {
-            Start-LLMServer -ModelPath $MODELS['9'].Path -Alias 'glm-4.7-flash' -Arguments @(
+        '8' {
+            Start-LLMServer -ModelPath $MODELS['8'].Path -Alias 'glm4.7-flash' -Arguments @(
                 $COMMON_ARGS + @(
-                '--model',        $MODELS['9'].Path
+                '--model',        $MODELS['8'].Path
                 '--ctx-size',     '16384'
-                '--n-gpu-layers', '16'
-                '--batch-size',   '512'
-                '--ubatch-size',  '128'
-                '--temp',         '0.2'
-                '--top-k',        '50'
-                '--top-p',        '0.95'
+                '--batch-size',   '1024'
+                '--ubatch-size',  '512'
+                '--temp',         '0.7'
+                '--top-p',        '1.0'
                 '--min-p',        '0.01'
-                '--dry-multiplier', '1.1'
-                '--alias',        'glm-4.7-flash'
+                '-ot',            '.ffn_.*_exps.=CPU'
+                '--alias',        'glm4.7-flash'
                 )
             )
         }
