@@ -492,14 +492,17 @@ do {
             )
         }
         '8' {
+            # GUIDE: GLM-4.7-Flash model documentation
+            # https://unsloth.ai/docs/models/glm-4.7-flash
             Start-LLMServer -ModelPath $MODELS['8'].Path -Alias 'glm4.7-flash' -Arguments @(
                 $COMMON_ARGS + @(
                 '--model',        $MODELS['8'].Path
                 '--ctx-size',     '16384'
+                '--n-cpu-moe',    '48'
                 '--batch-size',   '1024'
                 '--ubatch-size',  '512'
-                '--temp',         '0.7'
-                '--top-p',        '1.0'
+                '--temp',         '0.6'
+                '--top-p',        '0.9'
                 '--min-p',        '0.01'
                 '-ot',            '.ffn_.*_exps.=CPU'
                 '--alias',        'glm4.7-flash'
